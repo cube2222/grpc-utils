@@ -5,57 +5,71 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/grpc-ecosystem/go-grpc-middleware/tags"
 	"github.com/satori/go.uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
 
+const Key = "request-id"
+
 func ServerInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		var requestID string
+
 		md, ok := metadata.FromIncomingContext(ctx)
 		if ok {
-			t := grpc_ctxtags.Extract(ctx)
-			if !t.Has("request-id") {
-				t.Set("request-id", md["request-id"][0])
-			} else {
-				log.Println("Missing request-id")
+			value := md.Get(Key)
+			if len(value) == 1 {
+				requestID = value[0]
 			}
-		} else {
-			log.Println("Missing metadata")
 		}
+
+		if requestID == "" {
+			requestID = GenerateRequestID()
+		}
+
+		ctx = context.WithValue(ctx, Key, requestID)
 		return handler(ctx, req)
 	}
 }
 
 func ClientInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		ID, ok := grpc_ctxtags.Extract(ctx).Values()["request-id"].(string)
-		if !ok || ID == "" {
-			// Fall back to taking out of context
-			ID, ok = ctx.Value("request-id").(string)
-			if !ok {
-				newID, err := uuid.NewV4()
-				if err != nil {
-					log.Println("Couldn't generate request uuid: ", err)
-				}
-				ID = newID.String()
-			}
+		var requestID string
+		if value, ok := ctx.Value(Key).(string); ok {
+			requestID = value
 		}
 
-		md := metadata.Pairs("request-id", ID)
-		ctx = metadata.NewOutgoingContext(ctx, md)
+		if requestID == "" {
+			requestID = GenerateRequestID()
+		}
+
+		ctx = metadata.AppendToOutgoingContext(ctx, Key, requestID)
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 }
 
-func HTTPInjector(h http.Handler) http.Handler {
+func HTTPInterceptor(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ID, err := uuid.NewV4()
-		if err != nil {
-			log.Println("Couldn't generate request uuid: ", err)
+		requestID := r.Header.Get(Key)
+		if requestID == "" {
+			requestID = GenerateRequestID()
 		}
-		r = r.WithContext(context.WithValue(r.Context(), "request-id", ID.String()))
+
+		r = r.WithContext(context.WithValue(r.Context(), Key, requestID))
 		h.ServeHTTP(w, r)
 	})
+}
+
+func GenerateRequestID() string {
+	var requestID string
+
+	id, err := uuid.NewV4()
+	if err != nil {
+		log.Printf("Couldn't generate request-id: %v", err)
+		requestID = "err"
+	}
+	requestID = id.String()
+
+	return requestID
 }
